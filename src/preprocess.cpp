@@ -5,10 +5,10 @@
 #define RETURN0 0x00
 #define RETURN0AND1 0x10
 
-Preprocess::Preprocess() : feature_enabled(0), lidar_type(AVIA), blind(0.01), point_filter_num(1)
+Preprocess::Preprocess() : feature_enabled(0), lidar_type(VELO16), blind(0.2), point_filter_num(4)
 {
   inf_bound = 10;
-  N_SCANS = 6;
+  N_SCANS = 16;
   SCAN_RATE = 10;
   group_size = 8;
   disA = 0.01;
@@ -910,7 +910,7 @@ void Preprocess::pub_func(PointCloudXYZI& pl, const rclcpp::Time& ct)
   pl.width = pl.size();
   sensor_msgs::msg::PointCloud2 output;
   pcl::toROSMsg(pl, output);
-  output.header.frame_id = "livox";
+  output.header.frame_id = "rslidar_base_link";
   output.header.stamp = ct;
 }
 
