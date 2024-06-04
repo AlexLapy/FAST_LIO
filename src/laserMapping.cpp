@@ -60,7 +60,6 @@
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
@@ -630,13 +629,19 @@ void set_posestamp(T & out)
     
 }
 
-void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped, std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br)
+void publish_odometry(
+        const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftMapped,
+        std::unique_ptr<tf2_ros::TransformBroadcaster> & tf_br,
+        std::unique_ptr<tf2_ros::Buffer> & tfBuffer,
+        rclcpp::Logger logger
+    )
 {
     odomAftMapped.header.frame_id = "odom";
     odomAftMapped.child_frame_id = "rslidar_base_link";
     odomAftMapped.header.stamp = get_ros_time(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
     pubOdomAftMapped->publish(odomAftMapped);
+    
     auto P = kf.get_P();
     for (int i = 0; i < 6; i ++)
     {
@@ -662,29 +667,30 @@ void publish_odometry(const rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPt
     trans.transform.rotation.z = odomAftMapped.pose.pose.orientation.z;
 
     try {
-            // Convert the odom to lidar transform to tf2 format
-            tf2::Transform t_odom_to_lidar;
-            tf2::fromMsg(trans.transform, t_odom_to_lidar);
+        // Convert the odom to lidar transform to tf2 format
+        tf2::Transform t_odom_to_lidar;
+        tf2::fromMsg(trans.transform, t_odom_to_lidar);
 
-            // Convert the lidar to base_link transform to tf2 format
-            geometry_msgs::msg::TransformStamped lidar_to_base_link = tfBuffer.lookupTransform("rslidar_base_link", "base_link", tf2::TimePointZero);
-            tf2::Transform t_lidar_to_base_link;
-            tf2::fromMsg(lidar_to_base_link.transform, t_lidar_to_base_link);
+        // Convert the lidar to base_link transform to tf2 format
+        geometry_msgs::msg::TransformStamped lidar_to_base_link = tfBuffer->lookupTransform("rslidar_base_link", "base_link", tf2::TimePointZero);
+        tf2::Transform t_lidar_to_base_link;
+        tf2::fromMsg(lidar_to_base_link.transform, t_lidar_to_base_link);
 
-            // Combine the transforms: odom -> rslidar_base_link -> base_link
-            tf2::Transform t_odom_to_base_link = t_odom_to_lidar * t_lidar_to_base_link;
+        // Combine the transforms: odom -> rslidar_base_link -> base_link
+        tf2::Transform t_odom_to_base_link = t_odom_to_lidar * t_lidar_to_base_link;
 
-            // Create and publish the combined transform
-            tf2::Stamped<tf2::Transform> temp_odom_to_base_link(t_odom_to_base_link, time_point, odometryFrame);
-            geometry_msgs::msg::TransformStamped trans_odom_to_base_link;
-            tf2::convert(temp_odom_to_base_link, trans_odom_to_base_link);
-            trans_odom_to_base_link.child_frame_id = "base_link";
+        // Create and publish the combined transform
+        tf2::TimePoint time_point = tf2_ros::fromRclcpp(get_ros_time(lidar_end_time));
+        tf2::Stamped<tf2::Transform> temp_odom_to_base_link(t_odom_to_base_link, time_point, "odom");
+        geometry_msgs::msg::TransformStamped trans_odom_to_base_link;
+        tf2::convert(temp_odom_to_base_link, trans_odom_to_base_link);
+        trans_odom_to_base_link.child_frame_id = "base_link";
 
-            tf_br->sendTransform(trans_odom_to_base_link);
+        tf_br->sendTransform(trans_odom_to_base_link);
 
-        } catch (tf2::TransformException &ex) {
-            RCLCPP_WARN(this->get_logger(), "Could not transform rslidar_base_link to base_link: %s", ex.what());
-        }
+    } catch (tf2::TransformException &ex) {
+        RCLCPP_WARN(logger, "Could not transform rslidar_base_link to base_link: %s", ex.what());
+    }
 }
 
 void publish_path(rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath)
@@ -827,8 +833,8 @@ class LaserMappingNode : public rclcpp::Node
 public:
     LaserMappingNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
     : Node("laser_mapping", options),
-      tfBuffer(this->get_clock()),         
-      tfListener(tfBuffer)  
+      tfBuffer_(std::make_unique<tf2_ros::Buffer>(this->get_clock())),
+      tfListener_(std::make_unique<tf2_ros::TransformListener>(*tfBuffer_))
     {
         this->declare_parameter<bool>("publish.path_en", true);
         this->declare_parameter<bool>("publish.effect_map_en", false);
@@ -1093,7 +1099,8 @@ private:
             double t_update_end = omp_get_wtime();
 
             /******* Publish odometry *******/
-            publish_odometry(pubOdomAftMapped_, tf_broadcaster_);
+            auto logger = this->get_logger();
+            publish_odometry(pubOdomAftMapped_, tf_broadcaster_, tfBuffer_, logger);
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
@@ -1172,8 +1179,8 @@ private:
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr sub_pcl_livox_;
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-    tf2_ros::Buffer tfBuffer;
-    tf2_ros::TransformListener tfListener;
+    std::unique_ptr<tf2_ros::Buffer> tfBuffer_;
+    std::unique_ptr<tf2_ros::TransformListener> tfListener_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr map_pub_timer_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
